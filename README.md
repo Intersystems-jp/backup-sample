@@ -10,15 +10,16 @@
 
 ### サンプルルーチンのインポート
 
-	%SYSネームスペースへインポートします。
-	（ルーチン名：ZBACKUP　でインポートされます。）
+%SYSネームスペースへインポートします。
+（ルーチン名：ZBACKUP　でインポートされます。）
 
 
 ### ルーチン実行
 
 #### ルーチン内のラベル名：help　を実行すると、実行に必要な引数の説明が表示されます。
 
-```USER>zn "%SYS"
+```
+USER>zn "%SYS"
  
 %SYS>do help^ZBACKUP
 set res=$$do^ZBACKUP(flag,dir,dblist)
@@ -30,7 +31,8 @@ set res=$$do^ZBACKUP(flag,dir,dblist)
                    : 0=DBACKルーチンの実行失敗（何らかのエラー発生）
   log   : ^ZBACKUPLOG,^ZBACKUPERR参照
  
-%SYS>```
+%SYS>
+```
 
 
 #### ルーチン内のラベル名：do を実行すると、バックアップが開始されます。
@@ -38,7 +40,8 @@ set res=$$do^ZBACKUP(flag,dir,dblist)
 ≪実行例≫　USERデータベースと、DEVデータベースのバックアップ例
 
 
-```%SYS>set status=$$do^ZBACKUP(3,"c:\temp\backup\","USER,DEV")
+```
+%SYS>set status=$$do^ZBACKUP(3,"c:\temp\backup\","USER,DEV")
  
 %SYS>write status
 1
@@ -53,7 +56,8 @@ set res=$$do^ZBACKUP(flag,dir,dblist)
 ^ZBACKUPLOG(1,6)="01/13/2012 16:05:33 [OK] レガシー並行外部バックアップ終了"
 ^ZBACKUPLOG(1,7)="01/13/2012 16:05:33 [COMPLETE] ZBACKUPが成功しました"
  
-%SYS>```
+%SYS>
+```
 
 バックアップ終了後、戻り値を確認します。（1は成功）
 バックアップログは、^ZBACKUPLOG　に記録されます。
