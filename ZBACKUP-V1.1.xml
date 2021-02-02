@@ -1,0 +1,320 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Export generator="Cache" version="25">
+<Routine name="ZBACKUP" type="MAC" languagemode="0"><![CDATA[
+ZBACKUP	// Cache2009.1以降で動作するサンプル
+	//	 （バックアップデータベースリストも一緒に更新するサンプルです）
+	//	2013/08/02　レガシー並行外部バックアップのCACHE.DATのコピー順番を変更
+	//	（変更前）x=$$BACKUP^DBACK("","E","dirty backup","","","")　の後にコピーしていたのを
+	//		上記実行前に移動しました。
+help use 0
+	write "set res=$$do^ZBACKUP(flag,dir,dblist)                          ",!
+	write "  flag  : [必須]バックアップ種類 (1=フル/2=差分/3=並行外部バックアップ)  ",!
+	write "  dir   : [必須]バックアップファイル格納フォルダ (C:\temp\ or /var/tmp/) ",!
+	write "  dblist: データベース名をカンマ区切りで指定 ",!
+	write "      例）　set dblist=""USER,TEST""",!
+	write "  res   : 1=成功, -1=失敗",!
+	write "		   : 0=DBACKルーチンの実行失敗（何らかのエラー発生）",!
+	write "  log   : ^ZBACKUPLOG,^ZBACKUPERR参照",!
+	quit
+	//-----------------------------------------------------------
+	// [ログ] 
+	//   ^ZBACKUPLOG=i        最新
+	//   ^ZBACKUPLOG(i)=step  最新  
+	//   ^ZBACKUPLOG(i,step)=mm/dd/yyyy hh:mm:ss [info] detail
+	//   
+	//   i      : ^ZBACKUPの実行回数（1,2,......）
+	//   step   : 現在実行している状態（1,2,......）
+	//   info   : START    = ZBACKUP処理開始
+	//            OK       = 正常処理ログ
+	//            ERR      = エラー発生ログ
+	//            ABORT    = エラー発生によりZBACKUPを終了
+	//            COMPLETE = 正常にZBACKUPを終了
+	//   detail : ログ内容
+	//
+	// [作成ファイル]
+	//   1. フルバックアップ
+	//      実行後、dir以下に
+	//      Fullyyyymmddhhmmss.bck, Fullyyyymmddhhmmss.log が作成される
+	//
+	//   2. 差分バックアップ
+	//      実行後、dir以下に
+	//      Incyyyymmddhhmmss.bck, Incyyyymmddhhmmss.log が作成される
+	//
+	//   3. 外部バックアップ (Dirty Backup)
+	//      実行後、dir以下に
+	//      DByyyymmddhhmmss\CACHE.DAT  .... のDATファイルと
+	//      Extyyyymmddhhmmss.bck, Extyyyymmddhhmmss.log が作成される
+	//-----------------------------------------------------------
+do(%flag,%dir,%dblist)
+	// %flag,%dir,%dblistはパブリック扱い
+	new (%flag,%dir,%dblist)
+	
+	// ◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆
+	//　　　エラートラップ利用時
+	/*
+	set $ZTRAP="Error",$ZERROR=""
+	set gen=$INCREMENT(^ZBACKUPLOG)     // 今回のBACKUP世代数
+	set st=$$Start(gen)
+	quit st
+	*/
+	// ◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆
+	
+
+	// ◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆
+	//　　　try-catch利用時
+	//（エラートラップ利用時は以下コメント）
+	// ◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆
+	try{
+		try {
+			set st=1
+			set gen=$INCREMENT(^ZBACKUPLOG)     // 今回のBACKUP世代数
+			set st=$$Start(gen)
+		}
+		catch ex {
+			Lock -^ZBACKUP
+			set st=-1
+			set ^ZBACKUPERR(gen)=$ZDATETIME($HOROLOG)_" "_ex.Name_" "_ex.Location_"  *"_ex.Data
+		}
+	}
+	catch ex{
+		//　下位のcatchブロックで予期せぬエラーがある事を想定したブロック
+		lock -ZBACKUP
+		set st=-1
+	}
+	quit st
+
+Start(gen) public {
+ 
+	// 引数チェック	
+	if $get(%flag)="" do LOG(gen,"ABORT","第1引数：flag の設定は必須です。") quit -1
+	if $get(%dir)=""  do LOG(gen,"ABORT","第2引数：dir の設定は必須です。")  quit -1
+	if %flag'=1,%flag'=2,%flag'=3 do LOG(gen,"ABORT","第1引数：flag に不正な値が登録されています") quit -1
+ 	if $get(%dblist)="" do LOG(gen,"ABORT","第3引数：dblist にデータベース名が指定されていません") quit -1
+ 	if ##class(%File).DirectoryExists(%dir)'=1 {
+		 do LOG(gen,"ABORT","第2引数：dir のディレクトリが存在しません")
+		quit -1
+ 	}
+ 	// バックアップ対象ディレクトリの末尾に \ や / があるかチェック
+ 	set chkdir=##class(%File).GetDirectory(%dir,1)
+ 	if $length(chkdir)'=$length(%dir) {
+		do LOG(gen,"ABORT","dir="_%dir_" の末尾に \ または / を付与してください")
+		quit -1
+ 	}
+ 	
+	// 二重起動チェック
+	LOCK +^ZBACKUP:0
+	if $TEST=0 do LOG(gen,"ABORT","ZBACKUPが既に実行中です") quit -1 
+ 
+	//---------- 1. START ----------
+	do LOG(gen,"START","ZBACKUP が開始されました")
+	
+	//---------- 2. Backup前準備 ----------
+	set h=$HOROLOG
+	set time=$TRANSLATE($ZDATETIME(h,8)," :","")   // yyyymmddhhmmss
+ 
+	// [目的]　dblistに登録されたデータベースの存在チェックを行います
+	// 変数 dblist=""USER,TEST"" より
+	// 変数 dirlist("C:\cachesys\mgr\user\")="USER" を作成
+ 	set st=$$getBackupDirList(gen,.dirlist)
+ 	
+ 	if st=-1 do LOG(gen,"ABORT","第3引数：dblist のデータベース名が存在しません") quit -1
+
+	// [目的]　dblistに指定されたデータベースをバックアップデータベースリストに設定します。
+	// データベースリストの更新
+	set st=$$setBackupDBList(gen,.dirlist)
+	if st=-1 do LOG(gen,"ABORT","バックアップデータベースリストの更新中にエラーが発生しました") quit -1
+	
+	//---------- 3. フラグごとにBACKUP変更 ----------
+	do LOG(gen,"OK","DBACKルーチンの実行開始")
+	if %flag=1 set x=$$fullBackup(gen,time)  // フルバックアップ
+	if %flag=2 set x=$$incBackup(gen,time)  // 差分バックアップ
+	if %flag=3 set x=$$extBackup(gen,time,.dirlist) // レガシー並行外部バックアップ
+
+	//---------- 4. 終了処理 ----------
+	if x=1 do LOG(gen,"COMPLETE","ZBACKUPが成功しました")
+	if x='1 do LOG(gen,"ABORT","DBACKでエラー発生:"_x)
+	LOCK -^ZBACKUP
+	quit x
+}
+
+	//-------------------------------------------------------------------
+	//   A. フルバックアップ 
+fullBackup(gen,time) public {
+	do LOG(gen,"OK","フルバックアップ開始")
+	set bck=%dir_"Full"_time_".bck"
+	set log=%dir_"Full"_time_".log"
+	set x=$$BACKUP^DBACK("","F","full",bck,"N",log,"NOINPUT","Y","Y","Y","")
+	if x=1 do LOG(gen,"OK","フルバックアップ終了")
+	if x=0 do LOG(gen,"ERR","フルバックアップでエラー発生")
+	quit x
+}
+	//   B. 差分バックアップ 
+incBackup(gen,time) public {
+	do LOG(gen,"OK","差分バックアップ開始")
+	set bck=%dir_"Inc"_time_".bck"
+	set log=%dir_"Inc"_time_".log"
+	set x=$$BACKUP^DBACK("","I","incremental",bck,"N",log,"NOINPUT","Y","Y","Y","")
+	if x=1 do LOG(gen,"OK","差分バックアップ終了")
+	if x=0 do LOG(gen,"ERR","差分バックアップでエラー発生")
+	quit x
+}
+	//   C. 外部バックアップ
+extBackup(gen,time,dirlist) public {
+	// (A) Externalフラグセット
+	set x=$$CLRINC^DBACK("QUIET")
+
+	// (B) CACHE.DATのコピー
+	do LOG(gen,"OK","CACHE.DATのコピー開始")
+	set st=$$copyDat(gen,.dirlist,time)
+	if st=-1 do LOG(gen,"ABORT","CACHE.datコピー中にエラー発生") quit -1
+	do LOG(gen,"OK","CACHE.DATのコピー終了")
+
+	// (C) 外部バックアップ・ユーティリティを使用したことを示す E パラメータのでDBACK実行
+	set x=$$BACKUP^DBACK("","E","dirty backup","","","")
+ 
+	// (D) Externalバックアップ実行
+	do LOG(gen,"OK","レガシー並行外部バックアップ開始")
+	set bck=%dir_"Ext"_time_".bck"
+	set log=%dir_"Ext"_time_".log"	
+	set x=$$BACKUP^DBACK("","I","external",bck,"N",log,"NOINPUT","Y","Y","Y","")
+	if x=1 do LOG(gen,"OK","レガシー並行外部バックアップ終了")
+	if x=0 do LOG(gen,"ERR","レガシー並行外部バックアップでエラー発生")
+	quit x
+}
+
+	//-------------------------------------------------------------------
+	//   変数 dblist("USER")="" より
+	//   変数 dirlist("C:\cachesys\mgr\user\")="USER" を作成
+	//
+getBackupDirList(gen,dirlist) public {
+	// Config.DatabaseクラスのListクエリを使用します	
+	set rset=##class(%ResultSet).%New("Config.Databases:List")
+	set st=rset.Execute(%dblist)
+	if $system.Status.IsError(st) {
+		do $system.Status.DecomposeStatus(st,.err)
+		for i=1:1:err {
+			do LOG(gen,"ERR","getBackupDirList():Execute():"_err(i))
+		}
+		quit -1
+	}
+	while (rset.Next()) {
+		set dirlist(rset.Get("Directory"))=rset.Get("Name")
+	}	
+		
+	// DBディレクトリリストが作成されない時
+	if $data(dirlist)=0 {
+		do LOG(gen,"ERR","指定のDB名["_%dblist_"]からデータベースディレクトリを取得できませんでした")
+		quit -1
+	}
+	quit 1
+}
+
+	//-------------------------------------------------------------------
+	//  バックアップデータベースリストを更新します。
+	//　（Backup.Generalクラスのメソッドを使用します。）
+	//
+setBackupDBList(gen,dirlist) public {
+	// 現在のデータベースリストを一旦削除
+	set st=##class(Backup.General).ClearDatabaseList()
+	if $system.Status.IsError(st) {
+		do $system.Status.DecomposeStatus(st,.err)
+		for i=1:1:err {
+			do LOG(gen,"ERR","setBackupDBList():リストのクリア:"_err(i))
+		}
+		quit -1
+	}
+
+	// データベースリストの追加
+	set dir=""
+	for {
+		set dir=$order(dirlist(dir))
+		if dir="" quit
+		// リストへ追加
+		set st=##class(Backup.General).AddDatabaseToList($get(dirlist(dir)))
+		if $system.Status.IsError(st) {
+			do $system.Status.DecomposeStatus(st,.err)
+			for i=1:1:err {
+				do LOG(gen,"ERR","setBackupDBList():リストの更新:"_err(i))
+			}
+			set err=1
+			quit
+		}
+	}
+	if $get(err)'="" quit -1
+	quit 1
+}
+
+ 
+	//------------------------------------------------------------------- 
+	//    指定データベースのCACHE.DATを
+	//    %dir\DByyyymmddhhmmss 以下にコピーする 
+copyDat(gen,dirlist,time) public {
+	// ex) %dir="C:\temp\", dbdir="C:\cachesys\mgr\user\", db="USER"
+	//     -> savdir="C:\temp\USERyyyymmddhhmmss"
+	//     -> orgdat="C:\cachesys\mgr\user\CACHE.DAT"
+	set dbdir=""
+	for {
+		set dbdir=$order(dirlist(dbdir))
+		if dbdir="" quit
+		set db=$get(dirlist(dbdir))
+		
+		// 保存先フォルダの作成
+		if ##class(%File).CreateNewDir(%dir,db_time)=0 {
+			do LOG(gen,"ERR",%dir_" 以下に "_db_time_" 作成失敗")
+			set err=1
+			quit
+		}
+		set savdir=%dir_db_time        // 保存先フォルダ
+
+		set orgdat=dbdir_"CACHE.DAT"   // コピー元CACHE.DAT
+
+		if ##class(%File).CopyFile(orgdat,savdir)=0 {
+			do LOG(gen,"ERR","copyDat: "_orgdat_" から "_savdir_" へのコピー失敗")
+			set err=1
+			quit
+		}
+	}
+	if $get(err)'="" quit -1
+	quit 1
+}
+
+	//-------------------------------------------------------------------
+	//    ログ情報セット
+	//    ログ情報を ^EBACKLOG に記述
+LOG(gen,info,detail) public {
+	//
+	// ◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆
+	//　　　try-catch利用時
+	//（エラートラップ利用時は以下コメント）
+	// ◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆
+	try {
+		set step=$INCREMENT(^ZBACKUPLOG(gen))    // 最新ステップ
+		set logtime=$ZDATETIME($HOROLOG)           // mm/dd/yyyy hh:mm:ss
+		set ^ZBACKUPLOG(gen,step)=logtime_" ["_info_"] "_$get(detail)
+	}
+	catch ex {
+		throw ex
+	}
+	quit
+	
+	// ◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆
+	//　エラートラップ利用時は以下利用
+	/*
+	set step=$INCREMENT(^ZBACKUPLOG(gen))    // 最新ステップ
+	set logtime=$ZDATETIME($HOROLOG)           // mm/dd/yyyy hh:mm:ss
+	set ^ZBACKUPLOG(gen,step)=logtime_" ["_info_"] "_$get(detail)
+	quit
+	*/
+	// ◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆
+}
+
+	// ◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆
+	//　　エラートラップ利用時使用される
+	//    エラー情報を ログ ^ZBACKUPERR に記録
+Error
+	set $ZTRAP="out",ze=$ZERROR
+	set ^ZBACKUPERR=$ZDATETIME($HOROLOG)_" "_ze
+out Lock -^ZBACKUP
+	quit -1	
+]]></Routine>
+</Export>
